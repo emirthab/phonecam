@@ -1,0 +1,184 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#111">
+<title>PhoneCam</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; background: #111; color: #eee;
+    font: 15px/1.4 -apple-system, system-ui, "Segoe UI", Roboto, sans-serif; }
+  body { display: flex; flex-direction: column; }
+  #view { flex: 1; position: relative; overflow: hidden; background: #000; }
+  video { width: 100%; height: 100%; object-fit: contain; }
+  video.mirror { transform: scaleX(-1); }
+  #start { position: absolute; inset: 0; margin: auto; width: 240px; height: 64px; border: 0;
+    border-radius: 32px; background: linear-gradient(135deg, #6366f1, #06b6d4); color: #fff;
+    font-size: 18px; font-weight: 600; box-shadow: 0 6px 24px rgba(6, 182, 212, .35); }
+  #bar { display: flex; gap: 8px; padding: 10px 12px calc(10px + env(safe-area-inset-bottom));
+    align-items: center; flex-wrap: wrap; background: #1b1b1b; }
+  #bar button, #bar select { background: #2b2b2b; color: #eee; border: 1px solid #3a3a3a;
+    border-radius: 8px; padding: 8px 10px; font-size: 14px; }
+  #status { flex: 1 1 100%; font-size: 13px; color: #aaa; }
+  #status b { color: #eee; }
+  .ok { color: #3fb950 !important; } .bad { color: #f85149 !important; }
+</style>
+</head>
+<body>
+<div id="view">
+  <video id="video" autoplay playsinline muted></video>
+  <button id="start" data-t="start"></button>
+</div>
+<div id="bar">
+  <button id="flip" data-t="flip"></button>
+  <select id="fit">
+    <option value="fit" data-t="fit"></option>
+    <option value="fill" data-t="fill"></option>
+  </select>
+  <select id="quality">
+    <option value="0.85" data-t="qHigh"></option>
+    <option value="0.7" data-t="qNormal" selected></option>
+    <option value="0.5" data-t="qLow"></option>
+  </select>
+  <div id="status"></div>
+</div>
+<script>
+const I18N = {
+  en: {
+    start: 'Start Camera', flip: 'Front / Back', fit: 'Fit', fill: 'Fill (crop)',
+    qHigh: 'High', qNormal: 'Normal', qLow: 'Low',
+    ready: 'Ready. Tap Start and allow camera access.',
+    needHttps: 'Camera needs HTTPS. Open the address with https://',
+    camFail: 'Could not open the camera: {0} — allow camera access in your browser settings.',
+    flipFail: 'Could not switch camera: {0}',
+    connecting: 'Connecting…',
+    unreachable: 'Cannot reach the PC: {0}',
+    live: '<b>Live</b> · {0} fps · {1} · Keep the screen on and this tab open.'
+  }
+};
+const t = (k, ...a) => I18N.en[k].replace(/\{(\d)\}/g, (_, i) => a[i]);
+document.querySelectorAll('[data-t]').forEach(el => el.textContent = t(el.dataset.t));
+
+const OUT_W = 1280, OUT_H = 720;
+const video = document.getElementById('video');
+const startBtn = document.getElementById('start');
+const statusEl = document.getElementById('status');
+const fitSel = document.getElementById('fit');
+const qSel = document.getElementById('quality');
+const canvas = document.createElement('canvas');
+const ctx = canvas.getContext('2d');
+
+let facing = 'user';
+let stream = null;
+let running = false;
+let sent = 0, lastFps = performance.now(), okState = null;
+
+function setStatus(html, cls) {
+  statusEl.innerHTML = html;
+  statusEl.className = cls || '';
+}
+setStatus(t('ready'));
+
+async function openCamera() {
+  if (stream) stream.getTracks().forEach(tr => tr.stop());
+  stream = await navigator.mediaDevices.getUserMedia({
+    audio: false,
+    video: { facingMode: { ideal: facing }, width: { ideal: 1280 }, height: { ideal: 720 }, frameRate: { ideal: 30 } }
+  });
+  video.srcObject = stream;
+  video.classList.toggle('mirror', facing === 'user');
+  await video.play().catch(() => {});
+}
+
+async function keepAwake() {
+  try {
+    if ('wakeLock' in navigator && document.visibilityState === 'visible') {
+      await navigator.wakeLock.request('screen');
+    }
+  } catch (e) {}
+}
+
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+
+function drawFrame() {
+  const vw = video.videoWidth, vh = video.videoHeight;
+  if (!vw || !vh) return false;
+  let sx = 0, sy = 0, sw = vw, sh = vh, dw, dh;
+  if (fitSel.value === 'fill') {
+    // crop the source to 16:9, centered
+    if (vw * OUT_H > vh * OUT_W) { sw = Math.round(vh * OUT_W / OUT_H); sx = Math.round((vw - sw) / 2); }
+    else { sh = Math.round(vw * OUT_H / OUT_W); sy = Math.round((vh - sh) / 2); }
+    dw = OUT_W; dh = OUT_H;
+  } else {
+    const s = Math.min(OUT_W / vw, OUT_H / vh);
+    dw = Math.round(vw * s); dh = Math.round(vh * s);
+  }
+  if (canvas.width !== dw || canvas.height !== dh) { canvas.width = dw; canvas.height = dh; }
+  ctx.drawImage(video, sx, sy, sw, sh, 0, 0, dw, dh);
+  return true;
+}
+
+async function loop() {
+  while (running) {
+    const t0 = performance.now();
+    if (document.visibilityState === 'visible' && drawFrame()) {
+      const blob = await new Promise(r => canvas.toBlob(r, 'image/jpeg', parseFloat(qSel.value)));
+      try {
+        const res = await fetch('/frame', { method: 'POST', body: blob, headers: { 'Content-Type': 'image/jpeg' }, cache: 'no-store' });
+        if (!res.ok) throw new Error('HTTP ' + res.status);
+        sent++;
+        okState = true;
+      } catch (e) {
+        okState = false;
+        setStatus(t('unreachable', e.message), 'bad');
+        await sleep(700);
+        continue;
+      }
+    }
+    const now = performance.now();
+    if (now - lastFps > 1000) {
+      const fps = Math.round(sent * 1000 / (now - lastFps)); sent = 0; lastFps = now;
+      if (okState) setStatus(t('live', fps, video.videoWidth + 'x' + video.videoHeight), 'ok');
+    }
+    const dt = performance.now() - t0;
+    if (dt < 33) await sleep(33 - dt);
+  }
+}
+
+startBtn.onclick = async () => {
+  if (!window.isSecureContext || !navigator.mediaDevices) {
+    setStatus(t('needHttps'), 'bad');
+    return;
+  }
+  try {
+    await openCamera();
+  } catch (e) {
+    setStatus(t('camFail', e.name), 'bad');
+    return;
+  }
+  startBtn.remove();
+  keepAwake();
+  running = true;
+  setStatus(t('connecting'));
+  loop();
+};
+
+document.getElementById('flip').onclick = async () => {
+  facing = facing === 'user' ? 'environment' : 'user';
+  if (running) {
+    try { await openCamera(); } catch (e) { setStatus(t('flipFail', e.name), 'bad'); }
+  }
+};
+
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'visible' && running) {
+    keepAwake();
+    // iOS may stop the track while hidden; reopen if so
+    if (!stream || stream.getVideoTracks().every(tr => tr.readyState === 'ended')) openCamera().catch(() => {});
+  }
+});
+</script>
+</body>
+</html>

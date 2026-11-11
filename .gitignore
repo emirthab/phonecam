@@ -1,0 +1,6 @@
+# build outputs
+/dist/
+*.exe
+*.syso
+assets/phonecam_vcam.dll
+assets/version.h

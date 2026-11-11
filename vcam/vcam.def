@@ -1,0 +1,6 @@
+LIBRARY phonecam_vcam
+EXPORTS
+    DllGetClassObject = PC_DllGetClassObject PRIVATE
+    DllCanUnloadNow = PC_DllCanUnloadNow PRIVATE
+    DllRegisterServer = PC_DllRegisterServer PRIVATE
+    DllUnregisterServer = PC_DllUnregisterServer PRIVATE
